@@ -1,0 +1,68 @@
+--- a/build/make/core/Makefile
++++ b/build/make/core/Makefile
+@@ -1849,6 +1849,24 @@
+ 
+ RECOVERYIMAGE_ID_FILE := $(PRODUCT_OUT)/recovery.id
+ 
++# Magisk injection function
++# This function assumes:
++#   Magisk has already been downloaded and is available at ./magisk-latest (relative to the root build directory)
++#   The function `package_files-copy-root` has been modified to also copy "." directories
++#   The function `fs_config` has been patched to supply SELinux contexts to the .backup directory
++#   This build targets ARM64
++define inject-magisk
++  $(hide) mkdir -p $(TARGET_RECOVERY_ROOT_OUT)/.backup
++  $(hide) cp -n $(TARGET_RECOVERY_ROOT_OUT)/system/bin/init $(TARGET_RECOVERY_ROOT_OUT)/.backup/init
++  $(hide) rm -f $(TARGET_RECOVERY_ROOT_OUT)/init
++  $(hide) cp ./magisk-latest/arm/magiskinit64 $(TARGET_RECOVERY_ROOT_OUT)/init
++  $(hide) echo "KEEPFORCEENCRYPT=true" > $(TARGET_RECOVERY_ROOT_OUT)/.backup/.magisk
++  $(hide) echo "KEEPVERITY=true" >> $(TARGET_RECOVERY_ROOT_OUT)/.backup/.magisk
++  $(hide) echo "RECOVERYMODE=false" >> $(TARGET_RECOVERY_ROOT_OUT)/.backup/.magisk
++  $(hide) ./magisk-latest/x86/magiskboot hexpatch $(recovery_kernel) 736B69705F696E697472616D6673 77616E745F696E697472616D6673
++  @echo "make $@: boot/recovery init binary has been replaced with MagiskInit"
++endef
++
+ # $(1): output file
+ define build-recoveryimage-target
+   # Making recovery image
+@@ -1860,6 +1878,7 @@
+   # Modifying ramdisk contents...
+   $(if $(filter true,$(BOARD_BUILD_SYSTEM_ROOT_IMAGE)),, \
+     $(hide) ln -sf /system/bin/init $(TARGET_RECOVERY_ROOT_OUT)/init)
++$(hide) $(call inject-magisk)
+   $(if $(BOARD_RECOVERY_KERNEL_MODULES), \
+     $(call build-image-kernel-modules,$(BOARD_RECOVERY_KERNEL_MODULES),$(TARGET_RECOVERY_ROOT_OUT),,$(call intermediates-dir-for,PACKAGING,depmod_recovery)))
+   # Removes $(TARGET_RECOVERY_ROOT_OUT)/init*.rc EXCEPT init.recovery*.rc.
+@@ -3712,10 +3731,14 @@
+ # $(1): Directory to copy
+ # $(2): Location to copy it to
+ # The "ls -A" is to prevent "acp s/* d" from failing if s is empty.
++# If a .backup directory exists (for Magisk), copy it as well
+ define package_files-copy-root
+   if [ -d "$(strip $(1))" -a "$$(ls -A $(1))" ]; then \
+     mkdir -p $(2) && \
+     $(ACP) -rd $(strip $(1))/* $(2); \
++    if [[ -d $(strip $(1))/.backup ]]; then \
++      $(ACP) -rd $(strip $(1))/.backup $(2); \
++    fi \
+   fi
+ endef
+ 
+@@ -3768,8 +3791,16 @@
+ # Run fs_config while creating the target files package
+ # $1: root directory
+ # $2: add prefix
++# If the root directory $1 ends in BOOT/RAMDISK, then this is the ramdisk image. Additional SELinux contexts are supplied.
+ define fs_config
+-(cd $(1); find . -type d | sed 's,$$,/,'; find . \! -type d) | cut -c 3- | sort | sed 's,^,$(2),' | $(HOST_OUT_EXECUTABLES)/fs_config -C -D $(TARGET_OUT) -S $(SELINUX_FC) -R "$(2)"
++if [[ $(1) == *BOOT/RAMDISK ]]; then \
++  (cd $(1); find . -type d | sed 's,$$,/,'; find . \! -type d) | cut -c 3- | sort | sed 's,^,$(2),' | $(HOST_OUT_EXECUTABLES)/fs_config -C -D $(TARGET_OUT) -S $(SELINUX_FC) -R "$(2)" | \
++  sed 's|.*backup\ .*|\.backup 0 0 000 selabel=u:object_r:rootfs:s0 capabilities=0x0|' | \
++  sed 's|.*backup/.magisk\ .*|.backup/.magisk 0 2000 750 selabel=u:object_r:rootfs:s0 capabilities=0x0|g' | \
++  sed 's|.*backup/init.*|.backup/init 0 2000 750 selabel=u:object_r:init_exec:s0 capabilities=0x0|g'; \
++else \
++  (cd $(1); find . -type d | sed 's,$$,/,'; find . \! -type d) | cut -c 3- | sort | sed 's,^,$(2),' | $(HOST_OUT_EXECUTABLES)/fs_config -C -D $(TARGET_OUT) -S $(SELINUX_FC) -R "$(2)"; \
++fi
+ endef
+ 
+ # $(1): file
